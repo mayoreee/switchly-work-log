@@ -27,7 +27,14 @@
 13.06.2024 Thursday    5h
 14.06.2024 Friday      5h
 
-Total                 96h 15m
+17.06.2024 Monday      6h
+18.06.2024 Tuesday     6h
+19.06.2024 Wednesday   6h
+20.06.2024 Thursday    6h
+21.06.2024 Friday      2h
+23.06.2024 Sunday      2h
+
+Total                124h 15m
 ```
 
 #### 20.03.2024 Wednesday 2h
@@ -4465,6 +4472,570 @@ https://github.com/alexdcox/cardano-proxy
 https://github.com/alexdcox/cardano-go
 
 We ALMOST have a client capable of a full block sync. Next few days most likely.
+
+#### 17.06.2024 Monday 6h
+
+Right, need to make sure the segment reader is handling batching properly.
+
+Maybe the segment headers are dropped after start batch? Yeah, that was it.
+
+- batch start message
+- first message will contain the segment header
+- subsequent messages will need to be appended to the segment, 402 at a time until < 402
+- each segment needs to be added to the batch until the end batch bytes
+- the complete segment and message then needs to be constructed from all the payloads combined
+
+MessageEndBatch is not wrapped by a segment - no 8 byte segment header - so is
+just 2 bytes long.
+
+MessageEndBatch is just tacked on to the end of a batch.
+
+Having an issue with `0143-i-402.dat`. It comes straight after a valid complete 
+segment, within the batch, but doesn't start a new segment.
+
+> protocol 52428 is obviously wrong, read from hex: cccc
+
+```
+f8283bc6
+8003
+3000 (12288) -> 12288 * 2 = 24576
+
+2105da8680020002
+8101
+214d0d3c80030002
+8102
+```
+
+Tough day. Still haven't quite got my head around the best way to handle these
+batched messages. Maybe sleeping on it will help it click tomorrow.
+
+#### 18.06.2024 Tuesday 6h
+
+Hoping to crack the block download today.
+
+Right maybe there are inconsistencies here which are breaking things.  
+Are all batches not like this:  
+
+```
+batch(
+  segment(blockMessage)
+  segment(blockDoneMessage)
+)
+```
+
+No sometimes you have:
+
+```
+segment(startBlockBytes, blockMessage1, blockMessage2, blockDoneBytes)
+```
+
+Another useful thing to note is `cbor.me` doesn't need a single line of hex,
+new lines are ignored. Just a bit of a time saver.
+
+I think I just need to scrap what I have and try again. It's all a bit messy and
+confusing.
+
+`0368-i-18.dat` is a problem, we receive a random 18 bytes in the middle of a
+batch, doesn't look like a keep alive.
+
+Maybe `0x8102` is like a batch continue. OH. OHHH. Do I need different streams
+for each protocol? Just in case they overlap?? That would make sense.
+
+`0872-i-402.dat` - causing issues
+
+Ways the batch is started:
+- a valid and complete segment, with protocol 3 (block fetch), with subprotocol 2 (start batch)
+- a incomplete segment, protocol 3, with start batch bytes at the start, and the rest beginning the batch
+
+Actually they can be refactored to one thing.
+
+All blocks and all messages are now being parsed except the very last.
+
+Getting a `non-valid subprotocol segment` error.
+
+Wow. Finally. Made it. Ascended. That was suprisingly difficult. Changed the
+way the batch start bytes are handled.
+
+Now to move back to the client!
+
+Ah ffs, the only thing holding me up here is that the java client DID manage to
+decode block 10430523. I'm going to move on for now to keep my momentum up.
+
+Got the handshake response ok.
+
+Tomorrow could be the first block d/l day from an actual client 🤞
+
+#### 19.06.2024 Wednesday 6h
+
+These are the only outgoing messages I picked up during the proxy. Should be
+enough to get the block sync going, and they're all being serialized properly:
+- `MessageFindIntersect`
+- `MessageKeepAliveResponse`
+- `MessageProposeVersions`
+- `MessageRequestNext`
+- `MessageRequestRange`
+
+As they're all less than 402 bytes, they don't need to be batched either.
+
+Right, so after startbatch, we have to send a requestnext.
+
+- All messages have segment headers unless in a batch
+- A batch start can be triggered from:
+  - a single batch start message within it's own segment
+  - a batch start message within an incomplete segment with block data following
+
+Back to the segmentreader, need to be able to handle batch start and end within
+the same segment.
+
+OHHHH. Next realisation. The java block downloader went from the latest block
+BACKWARDS. I'm trying to go from the well known mainnet point forwards, which of
+course isn't going to work because it's way behind in eras and a totally
+different block format.
+
+If I hold a connection open for 10s without sending anything to a node, it
+closes the connection. So I'll set the keep alive pings to 9s. Maybe it'd be
+better to only send a keep alive after 9s of inactivity on the wire.
+
+It'd also be nice if the proxy could just hold connections open if the client
+is being debugged. Will it save me more time to implement that?
+
+I ripped out a ton of debug and redundant functions all over `cardano-go`. It's
+starting to actually look like a library.
+
+Refactored all the `message any` into `message Message` for extra type-safety, 
+also means I can automatically set the subprotocol during `SendMessage`, which
+isn't working properly at the moment.
+
+> parsed block: 10468162
+> block number: 10468162, transactions: 18
+
+Oh. My. God. 😆
+
+It only just went and bloody worked! 🍾🔥🔥🔥
+
+https://beta.explorer.cardano.org/en/block/10468162
+
+Confirmed 18 transactions, downloaded directly from another node! 🎶👂
+
+That is a massive milestone. I'm taking a celebratory brake.
+
+Now on to something completely different. Time for some research...
+
+How do we ask for the next block on bifrost restart? Is it just:
+- find intersect
+- request next
+
+From the `cardano-node` repo:
+
+```haskell
+documentFor (Namespace _ ["RequestNext"]) = Just $ mconcat
+  [ "Request the next update from the producer. The response can be a roll "
+  , "forward, a roll back or wait."
+  ]
+documentFor (Namespace _ ["AwaitReply"]) = Just $ mconcat
+  [ "Acknowledge the request but require the consumer to wait for the next "
+  , "update. This means that the consumer is synced with the producer, and "
+  , "the producer is waiting for its own chain state to change."
+  ]
+documentFor (Namespace _ ["RollForward"]) = Just $ mconcat
+  [ "Tell the consumer to extend their chain with the given header. "
+  , "\n "
+  , "The message also tells the consumer about the head point of the producer."
+  ]
+documentFor (Namespace _ ["RollBackward"]) = Just $ mconcat
+  [ "Tell the consumer to roll back to a given point on their chain. "
+  , "\n "
+  , "The message also tells the consumer about the head point of the producer."
+  ]
+documentFor (Namespace _ ["FindIntersect"]) = Just $ mconcat
+  [ "Ask the producer to try to find an improved intersection point between "
+  , "the consumer and producer's chains. The consumer sends a sequence of "
+  , "points and it is up to the producer to find the first intersection point "
+  , "on its chain and send it back to the consumer."
+  ]
+documentFor (Namespace _ ["IntersectFound"]) = Just $ mconcat
+  [ "The reply to the consumer about an intersection found. "
+  , "The consumer can decide weather to send more points. "
+  , "\n "
+  , "The message also tells the consumer about the head point of the producer."
+  ]
+documentFor (Namespace _ ["IntersectNotFound"]) = Just $ mconcat
+  [ "The reply to the consumer that no intersection was found: none of the "
+  , "points the consumer supplied are on the producer chain. "
+  , "\n "
+  , "The message also tells the consumer about the head point of the producer."
+  ]
+documentFor (Namespace _ ["Done"]) = Just $ mconcat
+  [ "We have to explain to the framework what our states mean, in terms of "
+  , "which party has agency in each state. "
+  , "\n "
+  , "Idle states are where it is for the client to send a message, "
+  , "busy states are where the server is expected to send a reply."
+  ]
+
+documentFor (Namespace _ ["RequestRange"]) = Just
+    "Request range of blocks."
+documentFor (Namespace _ ["StartBatch"]) = Just
+    "Start block streaming."
+documentFor (Namespace _ ["NoBlocks"]) = Just
+    "Respond that there are no blocks."
+documentFor (Namespace _ ["Block"]) = Just
+    "Stream a single block."
+documentFor (Namespace _ ["BatchDone"]) = Just
+    "End of block streaming."
+documentFor (Namespace _ ["ClientDone"]) = Just
+    "Client termination message."
+
+documentFor (Namespace _ ["SubmitTx"]) = Just
+  "The client submits a single transaction and waits a reply."
+documentFor (Namespace _ ["AcceptTx"]) = Just
+  "The server can reply to inform the client that it has accepted the \
+    \transaction."
+documentFor (Namespace _ ["RejectTx"]) = Just
+  "The server can reply to inform the client that it has rejected the \
+    \transaction. A reason for the rejection is included."
+documentFor (Namespace _ ["Done"]) = Just
+  "The client can terminate the protocol."
+```
+
+Nothing revolutionary there.
+
+How about this to try keeping blocks up to date:
+- `chainsync: find intersect` (reasonable point probably needs to be committed to bifrost, latest point(block/slot/hash) after that should be saved in bifrost)
+- `chainsync: request next`
+- `blockfetch: request range`
+- `blockfetch: wait` response OR skip to next step
+- `blockfetch: batch start` then read the block
+- if we don't after Xs we don't get another block, skip back up to `chainsync: request next`
+
+How do we submit a tx?
+
+This is a tx submit message, I think, taken from the java code:
+```
+84a300818258204d77bc019ede3afd35785a801693c3e96a85c2d6ea05e8a5b2b225bc947c9e3f010182825839001c1ffaf141ebbb8e3a7072bb15f50f938b994c82de2d175f358fc942441f00edfe1b8d6a84f0d19c25a9c8829442160c0b5c758094c423441a002dc6c0825839008c5bf0f2af6f1ef08bb3f6ec702dd16e1c514b7e1d12f7549b47db9f4d943c7af0aaec774757d4745d1a2c8dd3220e6ec2c9df23f757a2f81b00000002534a872c021a00029075a100818258209518c18103cbdab9c6e60b58ecc3e2eb439fef6519bb22570f391327381900a85840da208874993a6ac5955c090f2aed7d54d2d98d47b84ed79edaf3bb7d69844c9fa9ac62a56c5d26a807b2fb264c869efaf4e6889b6c6ac7555e1b5f570c77f405f5f6
+```
+
+Will that directly decode to a `TransactionBody`?  
+No, is the answer. It will not.
+
+> cbor: cannot unmarshal array into Go value of type main.TransactionBody (cannot decode CBOR array to struct without toarray option)
+
+It looks like:
+
+```
+[
+  {
+    0: [
+      [
+        h'4D77BC019EDE3AFD35785A801693C3E96A85C2D6EA05E8A5B2B225BC947C9E3F',
+        1
+      ]
+    ],
+    1: [
+      [
+        h'001C1FFAF141EBBB8E3A7072BB15F50F938B994C82DE2D175F358FC942441F00EDFE1B8D6A84F0D19C25A9C8829442160C0B5C758094C42344',
+        3000000
+      ],
+      [
+        h'008C5BF0F2AF6F1EF08BB3F6EC702DD16E1C514B7E1D12F7549B47DB9F4D943C7AF0AAEC774757D4745D1A2C8DD3220E6EC2C9DF23F757A2F8',
+        9987327788
+      ]
+    ],
+    2: 168053
+  },
+  {
+    0: [
+      [
+        h'9518C18103CBDAB9C6E60B58ECC3E2EB439FEF6519BB22570F391327381900A8',
+        h'DA208874993A6AC5955C090F2AED7D54D2D98D47B84ED79EDAF3BB7D69844C9FA9AC62A56C5D26A807B2FB264C869EFAF4E6889B6C6AC7555E1B5F570C77F405'
+      ]
+    ]
+  },
+  true,
+  null
+]
+```
+
+`TxSubmissionRequest` wraps `txnBytes` which is the above hex/cbor.
+
+Might have to replicate this method: `TransactionUtil.getTxHash(txBytes)`
+
+The `BodyType` of the `TxSubmit` looks like an int, an `Era` is a `uint64`, but
+as they represent the same thing I will use:
+
+```go
+bodyType := new(BodyType).FromEra(EraBabbage)
+```
+
+Actually no I'm not. I'll try with era first.
+
+- LocalTxSubmissionAgent
+- MsgSubmitTx
+- yaci/core/protocol/localtx
+- LocalTxSubmissionSerializers
+
+This is on the cbor serializer for the tx, seems familiar, it's that mysterious
+tag again.
+
+```
+txBs.setTag(24)
+```
+
+#### 20.06.2024 Thursday 6h
+
+Right, goals for today:
+- follow chain, save point, continue following
+- deserialize `submit tx message`
+
+start client:
+- load previous point or start point
+- connect to a node or a group of nodes, handshake, start reading messages, start keepalive routine
+- continue reading blocks from point
+
+stop client:
+- close outbound message channel
+- read last data from inbound channel
+- close tcp connections to node / group
+- save last point to filestore
+
+can I use the subtypeof thing with the roll forward?  
+yes! and it works real nice.  
+
+I may want to eventually have an interface with getter methods common to all  
+`SubtypeOf[X]` formats, such as, `getHash`, `getSlot` etc. so I don't have to  
+constantly be casting into subtypes. Case in point:
+
+```go
+var blockNumber int
+switch header := block.Data.Header.Subtype.(type) {
+case *BlockHeaderA:
+  blockNumber = header.Body.Number
+case *BlockHeaderB:
+  blockNumber = header.Body.Number
+}
+globalLog.Info().Msgf("decoded block: %d", blockNumber)
+```
+
+I _think_ it's working. Is it though?
+
+- IN MessageIntersectFound: slot: 16588737, hash: 6HrXqergZ5CrXDBzgWjf4BnvxUG6bP63wYJu7xsvkcUy
+- OUT MessageRequestNext
+- IN MessageRollBackward: slot: 16588737, hash: 6HrXqergZ5CrXDBzgWjf4BnvxUG6bP63wYJu7xsvkcUy
+- OUT MessageRequestNext
+- IN MessageRollForward: slot: 16588800, number: 5086524
+
+```
+6HrXqergZ5CrXDBzgWjf4BnvxUG6bP63wYJu7xsvkcUy
+4e9bbbb67e3ae262133d94c3da5bffce7b1127fc436e7433b87668dba34c354a
+```
+
+```
+9180d818e69cd997e34663c418a648c076f2e19cd4194e486e159d8580bc6cda
+```
+
+Okay just set the default tip to a block just gone. Will that work?
+
+Yes. Got a bit carried away with the block header B stuff above, that's not  
+really necessary as we won't be loading blocks that far back. Going to undo that  
+to keep things simple.    
+
+Track tip, add tip store, default mainnet tip, graceful shutdown.  
+
+That's pretty good. Now we can follow the chain sync info and pass those points  
+to the block fetch as we need to.  
+
+Onto tx submission...
+
+How do we actually build the txBytes, what are those above values?
+
+https://developers.cardano.org/docs/get-started/cardano-serialization-lib/generating-transactions
+
+- tx body
+  - inputs
+  - outputs
+  - fee
+- vkeywitness ?
+  - key
+  - sig
+- bool ?
+- null ?
+
+Going on a hunt for those `?`s
+
+https://cardano-course.gitbook.io/cardano-course/handbook/building-and-running-the-node/create-a-simple-transaction
+
+`cardano-node/cardano-submit-api/README.md`
+
+Oh that's pretty much what my cli proxy thing does, except mine is just a  
+passthrough to all the cli commands rather than the tx submission. Probably  
+would have taken me more time to use theirs due to all the nix compilation  
+stuff, but it's interesting to see we had the same solution. Still, doing  
+without the cli proxy would be better.
+
+Here's an older variant of txBytes in case I need it later:  
+Got it from cardano-node/.../test.sh
+```
+83a40081825820c84dbd7b780ff9be2bcc6990f043030fe649342f9fa7ba1bfa6fb5c0079501a400018282582b82d818582183581cf810f5ffa3613a7edcc1e733d0d73c89645d02221648a031436fd840a0001a4f7ed7fd1a45bb41e082581d619fc8d50cd36af0e35f43db0e2f220e4ccb774925f2ef3542875b37701a000f4240021a00030d40031a00f9c7cca102818458205e3eb96f2cfd7844b5eed5498fe487fc5271178fb251ebf3d33c5d8f49036d9358403c9ef2ce22b8a3fce622472f84c932679f95e0f3e139378fe9d6ab5442c60a9b87de374a0bc37667b1bf8d5c6bffb436ffd84b0fa56a7c86342962b9c293390758208ed6ca9faabd8499f021c2e51745436c99f9eab6c92f4b09b255bdd9f39bae2a41a0f6
+```
+```
+transaction =
+  [ transaction_body
+  , transaction_witness_set
+  , bool
+  , auxiliary_data / null
+  ]
+```
+
+What's the bool? I have a feeling it's called 'update'. Where's the  
+documentation on this?
+
+The java client doesn't actually build transactions itself which doesn't help,  
+it just works with hardcoded test txbytes or accepts bytes from the user.  
+
+Maybe it's an 'upgrade' marker?
+
+> Upgrade the transaction body from the previous era.
+> 
+> This can fail where elements of the transaction body are deprecated.
+> Compare this to `translateEraThroughCBOR`:
+>   `upgradeTxBody` will use the Haskell representation, but will not
+>   preserve the serialised form. However, it will be suitable for iterated
+>   translation through eras.
+>   `translateEraThroughCBOR` will preserve the binary representation, but is
+>   not guaranteed to work through multiple eras - that is, the serialised
+>   representation from era n is guaranteed valid in era n + 1, but not
+>   necessarily in era n + 2.
+
+Just reading: https://hackage.haskell.org/package/microlens-0.4.13.1/docs/Lens-Micro.html  
+What a beautifully unintelligible module for a impenetrably unintuitive language.  
+Can you tell I'm getting frustrated? 😄  
+
+Found this by searching `translateEraThroughCBOR`:
+
+```haskell
+let validating = tx ^. Alonzo.isValidTxL
+pure $ Tx $ AlonzoTx txBody txWits validating auxData
+```
+
+So all alonzo (4+) era txs have `validating = true`? Why? We already wrap the  
+tx submission with the era. Not making sense.
+
+There's also this:
+
+```haskell
+AlonzoTx {body, wits, auxiliaryData, isValid} =
+  encode $
+    Rec AlonzoTx
+      !> To body
+      !> To wits
+      !> To isValid
+      !> E (encodeNullMaybe encCBOR . strictMaybeToMaybe) auxiliaryData
+```
+
+Here's a good place to look for reasons it might be considered invalid:
+
+`cardano-ledger-test/src/Test/Cardano/Ledger/Examples/AlonzoInvalidTxUTXOW.hs`
+
+- no cost model
+- missing redeemer
+- wrong wpp hash
+- missing 1-phase script witness
+- missing 2-phase script witness
+- redeemer with incorrect label
+- missing datum
+- phase 1 script failure
+- valid transaction marked as invalid
+- invalid transaction marked as valid
+- too many execution units for tx
+- missing signature for collateral input
+- insufficient collateral
+- two-phase UTxO with no datum hash
+- unacceptable supplimentary datum
+- unacceptable extra redeemer
+- multiple equal plutus-locked certs
+- missing required key witness
+
+```haskell
+utxosTransition =
+  judgmentContext >>= \(TRC (_, _, tx)) -> do
+    case tx ^. isValidTxL of
+      IsValid True -> alonzoEvalScriptsTxValid
+      IsValid False -> alonzoEvalScriptsTxInvalid
+```
+
+Found it! Was in the ledger repo.
+
+> Tag indicating whether non-native scripts in this transaction are expected to  
+  validate. This is added by the block creator when constructing the block.
+
+So we want to set that to `false` I guess?
+
+
+#### 21.06.2024 Friday 2h
+
+Now what.
+
+I'm going to move to the bifrost implementation and get a reminder of how all
+this needs to link up.
+
+I like that.
+
+Which networks? Mainnet (main), preprod (stage), private/testnet (mock)
+
+- [x] common/address
+- [x] common/chain
+- [-] common/gas (not a thing any more)
+- [x] common/asset
+
+> 1 lovelace is equivalent to 0.000001 ADA
+
+6 D.P, the default is 8 so need to keep an eye on that.
+
+Here's the address format:  
+https://cips.cardano.org/cip/CIP-19
+
+cardano addresses have a 1 byte header  
+the first 4 bits indicate the header type  
+the last 4 bits indicate the network tag  
+
+addr1vpu5vlrf4xkxv2qpwngf6cjhtw542ayty80v8dyr49rf5eg0yu80w
+
+```
+func setBit(n int, pos uint) int {
+    n |= (1 << pos)
+    return n
+}
+```
+
+Added txbody header parsing.
+
+#### 23.06.2024 Sunday 2h
+
+On with the bifrost...
+
+- [x] common/pubkey
+- [ ] bifrost chainclient
+
+`GetAccountByAddress` for the dash client doesn't do anything. Whaaa??
+
+Okay I've exhausted all the simple obvious bifrost things. Now I actually need
+to do some proper thinking.
+
+Here's whats left:
+- `ShouldReportSolvency(height int64) bool`
+- `ReportSolvency(height int64) error`
+- `FetchMemPool(height int64) (stypes.TxIn, error)`
+- `FetchTxs(fetchHeight, chainHeight int64) (stypes.TxIn, error)`
+- `SignTx(tx stypes.TxOutItem, height int64) ([]byte, []byte, error)`
+- `BroadcastTx(_ stypes.TxOutItem, _ []byte) (string, error)`
+- `GetLatestTxForVault(vault string) (string, string, error)`
+- `GetAccount(poolPubKey common.PubKey, height *big.Int) (common.Account, error)`
+- `GetAccountByAddress(address string, height *big.Int) (common.Account, error)`
+- `OnObservedTxIn(txIn stypes.TxInItem, blockHeight int64)`
+- `GetConfirmationCount(txIn stypes.TxIn) int64`
+- `ConfirmationCountReady(txIn stypes.TxIn) bool`
+
+- [ ] generate an address from a private key
 
 
 
