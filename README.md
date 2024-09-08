@@ -7,10 +7,508 @@
 ```
 24.08.2024 Saturday   2h 30m
 25.08.2024 Sunday   4h
+30.08.2024 Friday  2h
+07.09.2024 Saturday 4h 30m
+08.09.2024 Sunday 6h
 
 
-Total                6h 30m
+Total                19h 00m
 ```
+
+
+
+
+### 07.09.2024 Saturday - 08.09.2024 Sunday
+
+Bulding the threshold signature scheme (TSS) with Stellar integration.
+
+Okay, back from hiatus. The objective this time is to implement TSS using the Binance TSS library [tss-lib](https://github.com/bnb-chain/tss-lib) and apply it to sign a Stellar transaction with a group of participants.
+
+
+**Step 1: Key Generation**
+
+We start by generating the cryptographic keys for the participants in the Threshold Signature Scheme (TSS). In TSS, the private key is split into multiple parts, with each participant holding a share. Here’s how we do that:
+
+```go
+keys, signPIDs, err := keygen.LoadKeygenTestFixturesRandomSet(threshold+1, participants)
+```
+- Threshold: The minimum number of participants required to sign (in this case, 3).
+- Participants: The total number of participants (set to 5 here).
+
+I then convert the generated keys into pointers to use them in other functions:
+
+```go
+keyPointers := make([]*keygen.LocalPartySaveData, len(keys))
+for i := range keys {
+    keyPointers[i] = &keys[i]
+}
+```
+
+Next, we extract the X-coordinate from the first public key (TSS keys are on an elliptic curve, so they have X and Y coordinates). We need this X-coordinate to convert it into a Stellar address format:
+
+```go
+x := keys[0].EDDSAPub.X()
+pubKeyBytes := x.Bytes()
+```
+
+**Step 2: Convert Public Key to Stellar Address**
+
+Stellar uses a unique address format, so I had to convert the public key (32 bytes) to a Stellar-compatible address using this function:
+
+```go
+addrHex, err := PublicKeyToStellarAddress(pubKeyBytes)
+
+func PublicKeyToStellarAddress(pubKeyBytes []byte) (string, error) {
+	if len(pubKeyBytes) != 32 {
+		return "", fmt.Errorf("invalid public key length: expected 32 bytes, got %d bytes")
+	}
+	stellarAddress, err := strkey.Encode(strkey.VersionByteAccountID, pubKeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode public key to Stellar address: %v", err)
+	}
+	return stellarAddress, nil
+}
+```
+
+This allows the multi-party generated key to be used as a valid Stellar address.
+
+**Step 3: Create a Stellar Transaction**
+
+Once we have the Stellar address, we can create a transaction. The goal here is to send 2 XLM to another address on the Stellar testnet:
+
+```go
+tx, err := createStellarTransaction(addrHex)
+
+func createStellarTransaction(sourceAddress string) (*txnbuild.Transaction, error) {
+	client := horizonclient.DefaultTestNetClient
+
+	accountRequest := horizonclient.AccountRequest{AccountID: sourceAddress}
+	sourceAccount, err := client.AccountDetail(accountRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load source account: %v", err)
+	}
+
+	// Define timebounds
+	timebounds := txnbuild.NewTimeout(43200) // 12 hours before expiry
+
+	// Define preconditions
+	preconditions := txnbuild.Preconditions{
+		TimeBounds: timebounds,
+	}
+
+	txParams := txnbuild.TransactionParams{
+		SourceAccount:        &sourceAccount,
+		IncrementSequenceNum: true,
+		Operations: []txnbuild.Operation{
+			&txnbuild.Payment{
+				SourceAccount: sourceAccount.GetAccountID(),
+				Destination:   "GBZFRQE42G2ULRFFITXP2UZAXRBYKQM7R7LZ3QS7YHDUUI5QQRHGBZCY",
+				Amount:        "2",
+				Asset:         txnbuild.NativeAsset{},
+			},
+		},
+		BaseFee:       txnbuild.MinBaseFee,
+		Preconditions: preconditions,
+	}
+
+	tx, err := txnbuild.NewTransaction(txParams)
+	fmt.Println(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build transaction: %v", err)
+	}
+
+	return tx, nil
+}
+```
+The function createStellarTransaction does the following:
+
+- Loads the source account details from the Stellar testnet.
+- Builds a payment operation to send XLM from the source address to the recipient.
+- Prepares a transaction with some basic options like a sequence number, base fee, and time bounds.
+
+
+Now, the most important part: signing the Stellar transaction using TSS. In TSS, no single party holds the full private key. Instead, each party holds a "share" of the key. To sign a transaction, we need a minimum number of parties (the threshold) to collaborate.
+
+**Step 4: Prepare the signing parties**
+Each party is initialized with the necessary key share and communication setup:
+
+```go
+p2pCtx := tss.NewPeerContext(signPIDs)
+parties := make([]*signing.LocalParty, 0, len(signPIDs))
+```
+We also set up communication channels to handle messages and errors:
+
+```go
+errCh := make(chan *tss.Error, len(signPIDs))
+outCh := make(chan tss.Message, len(signPIDs))
+endCh := make(chan *common.SignatureData, len(signPIDs))
+```
+Next, we generate the hash of the Stellar transaction, which is what we will sign:
+
+```go
+msgData, err := tx.Hash(network.TestNetworkPassphrase)
+```
+
+**Step 5: Initialize the signing parties**
+We loop through each party and initialize them with their key shares and parameters (like the number of parties, threshold, etc.):
+
+```go
+for i := 0; i < len(signPIDs); i++ {
+    params := tss.NewParameters(tss.Edwards(), p2pCtx, signPIDs[i], len(signPIDs), threshold)
+    P := signing.NewLocalParty(new(big.Int).SetBytes(msgData[:]), params, *keys[i], outCh, endCh, len(msgData[:])).(*signing.LocalParty)
+    parties = append(parties, P)
+    go func(P *signing.LocalParty) {
+        if err := P.Start(); err != nil {
+            errCh <- err
+        }
+    }(P)
+}
+```
+This starts the signing process for each party. Each party will generate a partial signature using its key share.
+
+**Step 6: Message passing**
+In TSS, parties need to communicate with each other to combine their partial signatures. The communication happens via message passing through the channels:
+
+```go
+for {
+    select {
+    case err := <-errCh:
+        fmt.Printf("Error: %s\n", err)
+        return xdr.DecoratedSignature{}, err
+
+    case msg := <-outCh:
+        dest := msg.GetTo()
+        if dest == nil {
+            for _, P := range parties {
+                if P.PartyID().Index == msg.GetFrom().Index {
+                    continue
+                }
+                go updater(P, msg, errCh)
+            }
+        } else {
+            go updater(parties[dest[0].Index], msg, errCh)
+        }
+    }
+}
+```
+- outCh: Sends messages between the parties to coordinate the signing process.
+- errCh: Captures any errors.
+- updater: A helper function that ensures messages get sent to the right parties.
+
+
+**Step 7: Collect signatures**
+When all participants have signed, the partial signatures are combined into a final signature:
+
+```go
+case sigData := <-endCh:
+    atomic.AddInt32(&ended, 1)
+    if atomic.LoadInt32(&ended) == int32(len(signPIDs)) {
+        signature := append(sigData.R, sigData.S...)
+        ok := ed25519.Verify(pubKey, msgData[:], signature)
+        fmt.Println("Signature verification is: ", ok)
+```
+Here, the signature parts (R and S) are combined, and we verify the signature using the public key and transaction hash.
+
+
+**Step 8: Attach Signature to Transaction**
+
+Once the signature is ready, it gets attached to the transaction:
+
+```go
+tx, err := appendSignatureToTransaction(tx, decoratedSig)
+```
+This function appends the signature to the Stellar transaction’s XDR (Stellar’s format for encoding transactions).
+
+
+Okay, it's been a long week, all seems to be working except the signature verification step whtih isn't passing as expected. Next time, I will inviestigned this issue. Here the full code for now (also in the `demo/stellar/vault.go`):
+
+```go
+package main
+
+import (
+
+	"crypto/ed25519"
+	"encoding/hex"
+	"fmt"
+	"log"
+	"math/big"
+	"sync/atomic"
+
+	"github.com/bnb-chain/tss-lib/v2/common"
+	"github.com/bnb-chain/tss-lib/v2/eddsa/keygen"
+	"github.com/bnb-chain/tss-lib/v2/eddsa/signing"
+	"github.com/bnb-chain/tss-lib/v2/test"
+	"github.com/bnb-chain/tss-lib/v2/tss"
+	"github.com/stellar/go/clients/horizonclient"
+	"github.com/stellar/go/network"
+	"github.com/stellar/go/strkey"
+	"github.com/stellar/go/txnbuild"
+	"github.com/stellar/go/xdr"
+)
+
+const (
+	participants = 5
+	threshold    = 3
+)
+
+func main() {
+	// Step 1: Keygen
+
+	// Load keygen fixtures
+	keys, signPIDs, err := keygen.LoadKeygenTestFixturesRandomSet(threshold+1, participants)
+	if err != nil {
+		log.Fatalf("Failed to load keygen fixtures: %v", err)
+	}
+
+	// Convert the keys slice to a slice of pointers
+	keyPointers := make([]*keygen.LocalPartySaveData, len(keys))
+	for i := range keys {
+		keyPointers[i] = &keys[i]
+	}
+
+	// Extract the X coordinate of the public key
+	x := keys[0].EDDSAPub.X()
+
+	// Convert X to a 32-byte array (Ed25519 public keys are 32 bytes)
+	pubKeyBytes := x.Bytes()
+
+	// Convert the 32-byte public key to a Stellar address
+	addrHex, err := PublicKeyToStellarAddress(pubKeyBytes)
+	if err != nil {
+		fmt.Printf("Failed to convert public key to Stellar address: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Pub Key (X coordinate, hex): %s\n", hex.EncodeToString(pubKeyBytes))
+	fmt.Printf("Stellar Address: %s\n", addrHex)
+
+	// Step 2: Create a Stellar transaction
+	tx, err := createStellarTransaction(addrHex)
+	if err != nil {
+		log.Fatalf("Failed to create Stellar transaction: %v", err)
+	}
+
+	// Step 3: TSS Signing
+	decoratedSig, err := signTransactionWithTSS(tx, keyPointers, signPIDs, pubKeyBytes)
+	if err != nil {
+		log.Fatalf("Failed to sign transaction: %v", err)
+	}
+
+	// Step 4: Attach the signature and broadcast the transaction
+	tx, err = appendSignatureToTransaction(tx, decoratedSig)
+	if err != nil {
+		log.Fatalf("Failed to attach signature to transaction: %v", err)
+	}
+
+	// client := horizonclient.DefaultTestNetClient
+	// resp, err := client.SubmitTransaction(tx)
+	// if err != nil {
+	// 	log.Fatalf("Failed to broadcast transaction: %v", err)
+	// }
+
+	// fmt.Printf("Transaction successful! Hash: %s\n", resp.Hash)
+}
+
+func PublicKeyToStellarAddress(pubKeyBytes []byte) (string, error) {
+	if len(pubKeyBytes) != 32 {
+		return "", fmt.Errorf("invalid public key length: expected 32 bytes, got %d bytes")
+	}
+	stellarAddress, err := strkey.Encode(strkey.VersionByteAccountID, pubKeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode public key to Stellar address: %v", err)
+	}
+	return stellarAddress, nil
+}
+
+func createStellarTransaction(sourceAddress string) (*txnbuild.Transaction, error) {
+	client := horizonclient.DefaultTestNetClient
+
+	accountRequest := horizonclient.AccountRequest{AccountID: sourceAddress}
+	sourceAccount, err := client.AccountDetail(accountRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load source account: %v", err)
+	}
+
+	// Define timebounds
+	timebounds := txnbuild.NewTimeout(43200)
+
+	// Define preconditions
+	preconditions := txnbuild.Preconditions{
+		TimeBounds: timebounds,
+	}
+
+	txParams := txnbuild.TransactionParams{
+		SourceAccount:        &sourceAccount,
+		IncrementSequenceNum: true,
+		Operations: []txnbuild.Operation{
+			&txnbuild.Payment{
+				SourceAccount: sourceAccount.GetAccountID(),
+				Destination:   "GBZFRQE42G2ULRFFITXP2UZAXRBYKQM7R7LZ3QS7YHDUUI5QQRHGBZCY",
+				Amount:        "2",
+				Asset:         txnbuild.NativeAsset{},
+			},
+		},
+		BaseFee:       txnbuild.MinBaseFee,
+		Preconditions: preconditions,
+	}
+
+	tx, err := txnbuild.NewTransaction(txParams)
+	fmt.Println(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build transaction: %v", err)
+	}
+
+	return tx, nil
+}
+
+func signTransactionWithTSS(tx *txnbuild.Transaction, keys []*keygen.LocalPartySaveData, signPIDs tss.SortedPartyIDs, pubKeyBytes []byte) (xdr.DecoratedSignature, error) {
+	p2pCtx := tss.NewPeerContext(signPIDs)
+	parties := make([]*signing.LocalParty, 0, len(signPIDs))
+
+	errCh := make(chan *tss.Error, len(signPIDs))
+	outCh := make(chan tss.Message, len(signPIDs))
+	endCh := make(chan *common.SignatureData, len(signPIDs))
+
+	updater := test.SharedPartyUpdater
+	msgData, err := tx.Hash(network.TestNetworkPassphrase) // The hash of the transaction to be signed
+	if err != nil {
+		return xdr.DecoratedSignature{}, fmt.Errorf("failed to build transaction hash: %v", err)
+	}
+
+	// Initialize the parties
+	for i := 0; i < len(signPIDs); i++ {
+		params := tss.NewParameters(tss.Edwards(), p2pCtx, signPIDs[i], len(signPIDs), threshold)
+		P := signing.NewLocalParty(new(big.Int).SetBytes(msgData[:]), params, *keys[i], outCh, endCh, len(msgData[:])).(*signing.LocalParty)
+		parties = append(parties, P)
+		go func(P *signing.LocalParty) {
+			if err := P.Start(); err != nil {
+				errCh <- err
+			}
+		}(P)
+	}
+
+	var ended int32
+	for {
+		select {
+		case err := <-errCh:
+			fmt.Printf("Error: %s\n", err)
+			return xdr.DecoratedSignature{}, err
+
+		case msg := <-outCh:
+			dest := msg.GetTo()
+			if dest == nil {
+				for _, P := range parties {
+					if P.PartyID().Index == msg.GetFrom().Index {
+						continue
+					}
+					go updater(P, msg, errCh)
+				}
+			} else {
+				if dest[0].Index == msg.GetFrom().Index {
+					fmt.Printf("party %d tried to send a message to itself (%d)\n", dest[0].Index, msg.GetFrom().Index)
+				}
+				go updater(parties[dest[0].Index], msg, errCh)
+
+			}
+
+		case sigData := <-endCh:
+			atomic.AddInt32(&ended, 1)
+			if atomic.LoadInt32(&ended) == int32(len(signPIDs)) {
+				fmt.Printf("Received signature data from %d participants\n", ended)
+
+				// Extract the 32-byte public key
+				pubKey := ed25519.PublicKey(pubKeyBytes)
+
+				signature := append(sigData.R, sigData.S...)
+				fmt.Println("signature is: ", signature)
+
+				// Verify the signature
+				ok := ed25519.Verify(pubKey, msgData[:], signature)
+				fmt.Println("Signature verification is: ", ok)
+
+				decoratedSig, err := CreateDecoratedSignature(pubKeyBytes, sigData.S)
+				if err != nil {
+					return xdr.DecoratedSignature{}, fmt.Errorf("failed to create decorated signature: %v", err)
+				}
+
+				return decoratedSig, nil
+			}
+		}
+	}
+}
+
+// appendSignatureToTransaction adds a signature to the transaction.
+func appendSignatureToTransaction(tx *txnbuild.Transaction, sig xdr.DecoratedSignature) (*txnbuild.Transaction, error) {
+	// Marshal the transaction to XDR
+	txXDR, err := tx.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal transaction to XDR: %v", err)
+	}
+
+	// Unmarshal XDR to TransactionEnvelope
+	var txEnvelope xdr.TransactionEnvelope
+	err = xdr.SafeUnmarshal(txXDR, &txEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal transaction XDR: %v", err)
+	}
+
+	// Ensure that V1 is not nil and initialize the Signatures slice if necessary
+	if txEnvelope.V1 == nil {
+		return nil, fmt.Errorf("unexpected nil V0 in transaction envelope")
+	}
+
+	if txEnvelope.V1.Signatures == nil {
+		txEnvelope.V1.Signatures = []xdr.DecoratedSignature{}
+	}
+
+	// Add the signature to the transaction envelope
+	txEnvelope.V1.Signatures = append(txEnvelope.V1.Signatures, sig)
+
+	// Marshal updated TransactionEnvelope to XDR
+	updatedXDR, err := xdr.MarshalBase64(txEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal updated transaction envelope: %v", err)
+	}
+
+	// Recreate the transaction from updated XDR
+	updatedGenericTx, err := txnbuild.TransactionFromXDR(updatedXDR)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transaction from updated XDR: %v", err)
+	}
+
+	// Now we need to handle the specific transaction type
+	updatedTx, ok := updatedGenericTx.Transaction()
+	if !ok {
+		return nil, fmt.Errorf("unexpected transaction type: %T", updatedGenericTx)
+	}
+
+	return updatedTx, nil
+}
+
+// CreateDecoratedSignature converts a byte slice signature to a DecoratedSignature.
+func CreateDecoratedSignature(pubKeyBytes []byte, sig []byte) (xdr.DecoratedSignature, error) {
+	// Convert the public key to XDR SignatureHint (last 4 bytes of the public key)
+	hint := xdr.SignatureHint{}
+	copy(hint[:], pubKeyBytes[len(pubKeyBytes)-4:])
+
+	// Convert the signature bytes to XDR Signature
+	xdrSig := xdr.Signature(sig)
+
+	return xdr.DecoratedSignature{
+		Hint:      hint,
+		Signature: xdrSig,
+	}, nil
+}
+
+```
+
+
+### 30.08.2024 
+
+Reading the revised version of the Gennaro-Goldfeder paper [here](https://eprint.iacr.org/2019/114.pdf)
+
+Piecing together Thorchain's implementation and usage of the GG TSS algo
+
 
 ### 25.08.2024 Sunday
 
