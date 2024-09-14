@@ -1,9 +1,8 @@
 package main
 
 import (
-
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"math/big"
@@ -14,11 +13,11 @@ import (
 	"github.com/bnb-chain/tss-lib/v2/eddsa/signing"
 	"github.com/bnb-chain/tss-lib/v2/test"
 	"github.com/bnb-chain/tss-lib/v2/tss"
+	"github.com/decred/dcrd/dcrec/edwards/v2"
 	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/network"
 	"github.com/stellar/go/strkey"
 	"github.com/stellar/go/txnbuild"
-	"github.com/stellar/go/xdr"
 )
 
 const (
@@ -27,89 +26,71 @@ const (
 )
 
 func main() {
-	// Step 1: Keygen
-
-	// Load keygen fixtures
+	// Keygen: Load keygen fixtures
 	keys, signPIDs, err := keygen.LoadKeygenTestFixturesRandomSet(threshold+1, participants)
 	if err != nil {
 		log.Fatalf("Failed to load keygen fixtures: %v", err)
 	}
 
-	// Convert the keys slice to a slice of pointers
-	keyPointers := make([]*keygen.LocalPartySaveData, len(keys))
-	for i := range keys {
-		keyPointers[i] = &keys[i]
-	}
-
-	// Extract the X coordinate of the public key
-	x := keys[0].EDDSAPub.X()
-
-	// Convert X to a 32-byte array (Ed25519 public keys are 32 bytes)
-	pubKeyBytes := x.Bytes()
-
-	// Convert the 32-byte public key to a Stellar address
-	addrHex, err := PublicKeyToStellarAddress(pubKeyBytes)
+	// Convert public key to Stellar address
+	stellarAddr, err := getStellarAddressFromKey(keys[0].EDDSAPub.X(), keys[0].EDDSAPub.Y())
 	if err != nil {
-		fmt.Printf("Failed to convert public key to Stellar address: %v\n", err)
-		return
+		log.Fatalf("Failed to convert public key to Stellar address: %v", err)
 	}
+	fmt.Printf("Stellar Address: %s\n", stellarAddr)
 
-	fmt.Printf("Pub Key (X coordinate, hex): %s\n", hex.EncodeToString(pubKeyBytes))
-	fmt.Printf("Stellar Address: %s\n", addrHex)
-
-	// Step 2: Create a Stellar transaction
-	tx, err := createStellarTransaction(addrHex)
+	// Create Stellar transaction
+	tx, err := createStellarTransaction(stellarAddr)
 	if err != nil {
 		log.Fatalf("Failed to create Stellar transaction: %v", err)
 	}
 
-	// Step 3: TSS Signing
-	decoratedSig, err := signTransactionWithTSS(tx, keyPointers, signPIDs, pubKeyBytes)
+	// Sign transaction with TSS
+	sigBase64, err := signTransactionWithTSS(tx, keys, signPIDs)
 	if err != nil {
 		log.Fatalf("Failed to sign transaction: %v", err)
 	}
 
-	// Step 4: Attach the signature and broadcast the transaction
-	tx, err = appendSignatureToTransaction(tx, decoratedSig)
+	// Attach signature and broadcast
+	tx, err = appendSignatureToTransaction(stellarAddr, tx, sigBase64)
 	if err != nil {
 		log.Fatalf("Failed to attach signature to transaction: %v", err)
 	}
 
-	// client := horizonclient.DefaultTestNetClient
-	// resp, err := client.SubmitTransaction(tx)
-	// if err != nil {
-	// 	log.Fatalf("Failed to broadcast transaction: %v", err)
-	// }
+	client := horizonclient.DefaultTestNetClient
+	resp, err := client.SubmitTransaction(tx)
+	if err != nil {
+		log.Fatalf("Failed to broadcast transaction: %v", err)
+	}
 
-	// fmt.Printf("Transaction successful! Hash: %s\n", resp.Hash)
+	fmt.Printf("Transaction successful! Hash: %s\n", resp.Hash)
 }
 
-func PublicKeyToStellarAddress(pubKeyBytes []byte) (string, error) {
-	if len(pubKeyBytes) != 32 {
-		return "", fmt.Errorf("invalid public key length: expected 32 bytes, got %d bytes")
+// getStellarAddressFromKey converts X and Y coordinates from EDDSA public key to a Stellar address.
+func getStellarAddressFromKey(pkX, pkY *big.Int) (string, error) {
+	pubKey := edwards.PublicKey{
+		Curve: edwards.Edwards(),
+		X:     pkX,
+		Y:     pkY,
 	}
-	stellarAddress, err := strkey.Encode(strkey.VersionByteAccountID, pubKeyBytes)
+
+	pubBytes := pubKey.Serialize()
+	stellarPubKey := ed25519.PublicKey(pubBytes)
+
+	stellarAddress, err := strkey.Encode(strkey.VersionByteAccountID, stellarPubKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to encode public key to Stellar address: %v", err)
 	}
 	return stellarAddress, nil
 }
 
+// createStellarTransaction builds a Stellar transaction with a payment operation.
 func createStellarTransaction(sourceAddress string) (*txnbuild.Transaction, error) {
 	client := horizonclient.DefaultTestNetClient
-
 	accountRequest := horizonclient.AccountRequest{AccountID: sourceAddress}
 	sourceAccount, err := client.AccountDetail(accountRequest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load source account: %v", err)
-	}
-
-	// Define timebounds
-	timebounds := txnbuild.NewTimeout(43200)
-
-	// Define preconditions
-	preconditions := txnbuild.Preconditions{
-		TimeBounds: timebounds,
 	}
 
 	txParams := txnbuild.TransactionParams{
@@ -124,11 +105,10 @@ func createStellarTransaction(sourceAddress string) (*txnbuild.Transaction, erro
 			},
 		},
 		BaseFee:       txnbuild.MinBaseFee,
-		Preconditions: preconditions,
+		Preconditions: txnbuild.Preconditions{TimeBounds: txnbuild.NewTimeout(43200)},
 	}
 
 	tx, err := txnbuild.NewTransaction(txParams)
-	fmt.Println(tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build transaction: %v", err)
 	}
@@ -136,141 +116,95 @@ func createStellarTransaction(sourceAddress string) (*txnbuild.Transaction, erro
 	return tx, nil
 }
 
-func signTransactionWithTSS(tx *txnbuild.Transaction, keys []*keygen.LocalPartySaveData, signPIDs tss.SortedPartyIDs, pubKeyBytes []byte) (xdr.DecoratedSignature, error) {
+func signTransactionWithTSS(tx *txnbuild.Transaction, keys []keygen.LocalPartySaveData, signPIDs tss.SortedPartyIDs) (string, error) {
 	p2pCtx := tss.NewPeerContext(signPIDs)
-	parties := make([]*signing.LocalParty, 0, len(signPIDs))
+	parties := make([]*signing.LocalParty, len(signPIDs))
 
 	errCh := make(chan *tss.Error, len(signPIDs))
 	outCh := make(chan tss.Message, len(signPIDs))
 	endCh := make(chan *common.SignatureData, len(signPIDs))
 
+	// Use SharedPartyUpdater (from test) as the PartyUpdater
 	updater := test.SharedPartyUpdater
-	msgData, err := tx.Hash(network.TestNetworkPassphrase) // The hash of the transaction to be signed
+	msgData, err := network.HashTransactionInEnvelope(tx.ToXDR(), network.TestNetworkPassphrase)
 	if err != nil {
-		return xdr.DecoratedSignature{}, fmt.Errorf("failed to build transaction hash: %v", err)
+		return "", fmt.Errorf("failed to hash transaction: %v", err)
 	}
 
-	// Initialize the parties
-	for i := 0; i < len(signPIDs); i++ {
-		params := tss.NewParameters(tss.Edwards(), p2pCtx, signPIDs[i], len(signPIDs), threshold)
-		P := signing.NewLocalParty(new(big.Int).SetBytes(msgData[:]), params, *keys[i], outCh, endCh, len(msgData[:])).(*signing.LocalParty)
-		parties = append(parties, P)
-		go func(P *signing.LocalParty) {
-			if err := P.Start(); err != nil {
+	// Initialize TSS parties
+	for i := range signPIDs {
+		params := tss.NewParameters(edwards.Edwards(), p2pCtx, signPIDs[i], len(signPIDs), threshold)
+		localParty := signing.NewLocalParty(new(big.Int).SetBytes(msgData[:]), params, keys[i], outCh, endCh, len(msgData)).(*signing.LocalParty)
+		parties[i] = localParty
+
+		go func(p *signing.LocalParty) {
+			if err := p.Start(); err != nil {
 				errCh <- err
 			}
-		}(P)
+		}(localParty)
 	}
 
-	var ended int32
+	// Wait for signature data
+	var completed int32
 	for {
 		select {
 		case err := <-errCh:
-			fmt.Printf("Error: %s\n", err)
-			return xdr.DecoratedSignature{}, err
-
+			return "", fmt.Errorf("TSS error: %v", err)
 		case msg := <-outCh:
 			dest := msg.GetTo()
-			if dest == nil {
-				for _, P := range parties {
-					if P.PartyID().Index == msg.GetFrom().Index {
-						continue
+			if dest == nil { // Broadcast message
+				for _, party := range parties {
+					if party.PartyID().Index != msg.GetFrom().Index {
+						go updater(party, msg, errCh)
 					}
-					go updater(P, msg, errCh)
 				}
-			} else {
-				if dest[0].Index == msg.GetFrom().Index {
-					fmt.Printf("party %d tried to send a message to itself (%d)\n", dest[0].Index, msg.GetFrom().Index)
-				}
+			} else { // Direct message
 				go updater(parties[dest[0].Index], msg, errCh)
-
 			}
-
 		case sigData := <-endCh:
-			atomic.AddInt32(&ended, 1)
-			if atomic.LoadInt32(&ended) == int32(len(signPIDs)) {
-				fmt.Printf("Received signature data from %d participants\n", ended)
-
-				// Extract the 32-byte public key
-				pubKey := ed25519.PublicKey(pubKeyBytes)
-
-				signature := append(sigData.R, sigData.S...)
-				fmt.Println("signature is: ", signature)
-
-				// Verify the signature
-				ok := ed25519.Verify(pubKey, msgData[:], signature)
-				fmt.Println("Signature verification is: ", ok)
-
-				decoratedSig, err := CreateDecoratedSignature(pubKeyBytes, sigData.S)
-				if err != nil {
-					return xdr.DecoratedSignature{}, fmt.Errorf("failed to create decorated signature: %v", err)
-				}
-
-				return decoratedSig, nil
+			if atomic.AddInt32(&completed, 1) == int32(len(signPIDs)) {
+				// Convert msgData from [32]byte to []byte before passing
+				return processSignatureData(sigData, keys[0], msgData[:])
 			}
 		}
 	}
 }
 
-// appendSignatureToTransaction adds a signature to the transaction.
-func appendSignatureToTransaction(tx *txnbuild.Transaction, sig xdr.DecoratedSignature) (*txnbuild.Transaction, error) {
-	// Marshal the transaction to XDR
-	txXDR, err := tx.MarshalBinary()
+// processSignatureData verifies and processes the signature data.
+func processSignatureData(sigData *common.SignatureData, key keygen.LocalPartySaveData, msgData []byte) (string, error) {
+	r := new(big.Int).SetBytes(sigData.R)
+	s := new(big.Int).SetBytes(sigData.S)
+
+	// Verify EDDSA signature
+	pubKey := edwards.PublicKey{
+		Curve: edwards.Edwards(),
+		X:     key.EDDSAPub.X(),
+		Y:     key.EDDSAPub.Y(),
+	}
+
+	if !edwards.Verify(&pubKey, msgData, r, s) {
+		return "", fmt.Errorf("EDDSA signature verification failed")
+	}
+
+	sig := edwards.Signature{R: r, S: s}
+	sigBytes := sig.Serialize()
+
+	// Encode to base64 and return
+	sigBase64 := base64.StdEncoding.EncodeToString(sigBytes)
+	return sigBase64, nil
+}
+
+// appendSignatureToTransaction adds a signature to the Stellar transaction.
+func appendSignatureToTransaction(stellarAddress string, tx *txnbuild.Transaction, sig string) (*txnbuild.Transaction, error) {
+	cleanedTx, err := tx.ClearSignatures()
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal transaction to XDR: %v", err)
+		return nil, fmt.Errorf("failed to clear signatures in tx: %v", err)
 	}
 
-	// Unmarshal XDR to TransactionEnvelope
-	var txEnvelope xdr.TransactionEnvelope
-	err = xdr.SafeUnmarshal(txXDR, &txEnvelope)
+	updatedTx, err := cleanedTx.AddSignatureBase64(network.TestNetworkPassphrase, stellarAddress, sig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal transaction XDR: %v", err)
-	}
-
-	// Ensure that V1 is not nil and initialize the Signatures slice if necessary
-	if txEnvelope.V1 == nil {
-		return nil, fmt.Errorf("unexpected nil V0 in transaction envelope")
-	}
-
-	if txEnvelope.V1.Signatures == nil {
-		txEnvelope.V1.Signatures = []xdr.DecoratedSignature{}
-	}
-
-	// Add the signature to the transaction envelope
-	txEnvelope.V1.Signatures = append(txEnvelope.V1.Signatures, sig)
-
-	// Marshal updated TransactionEnvelope to XDR
-	updatedXDR, err := xdr.MarshalBase64(txEnvelope)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal updated transaction envelope: %v", err)
-	}
-
-	// Recreate the transaction from updated XDR
-	updatedGenericTx, err := txnbuild.TransactionFromXDR(updatedXDR)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transaction from updated XDR: %v", err)
-	}
-
-	// Now we need to handle the specific transaction type
-	updatedTx, ok := updatedGenericTx.Transaction()
-	if !ok {
-		return nil, fmt.Errorf("unexpected transaction type: %T", updatedGenericTx)
+		return nil, fmt.Errorf("failed to append signature to tx: %v", err)
 	}
 
 	return updatedTx, nil
-}
-
-// CreateDecoratedSignature converts a byte slice signature to a DecoratedSignature.
-func CreateDecoratedSignature(pubKeyBytes []byte, sig []byte) (xdr.DecoratedSignature, error) {
-	// Convert the public key to XDR SignatureHint (last 4 bytes of the public key)
-	hint := xdr.SignatureHint{}
-	copy(hint[:], pubKeyBytes[len(pubKeyBytes)-4:])
-
-	// Convert the signature bytes to XDR Signature
-	xdrSig := xdr.Signature(sig)
-
-	return xdr.DecoratedSignature{
-		Hint:      hint,
-		Signature: xdrSig,
-	}, nil
 }

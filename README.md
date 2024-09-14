@@ -10,11 +10,52 @@
 30.08.2024 Friday  2h
 07.09.2024 Saturday 4h 30m
 08.09.2024 Sunday 6h
+14.09.2024 Saturday 9h
 
-
-Total                19h 00m
+Total                28h 00m
 ```
 
+### 14.09.2024 Saturday
+
+Last time, I made my initial implementation of the TSS for Stellar, but couldn't get a valid signature. Today's focus was on understanding this problem better and fixing the code for a valid Stellar signature. 
+
+Finally, after debugging and studying more on the edwards/ed25519 curve, I succeffully signed and broadcasted transactions on the Stellar testnet with a new approach. Haha I can't believe how I implemented this before!
+
+Below is my revised implementation summary and full code [here](https://github.com/mayoreee/switchly-work-log/demo/stellar/vault.go)
+
+**Approach Summary:**
+
+**1. Key Generation:** Generated TSS keys for multiple parties.
+
+**2. Address Conversion:** Converted an EDDSA public key to a Stellar address.
+
+**3. Transaction Creation:** Created a Stellar payment transaction using the Stellar Go SDK.
+
+**4. TSS Signing:** Signed the transaction using TSS, involving multiple parties for enhanced security.
+
+**5. Broadcasting:** Broadcasted the signed transaction to the Stellar network.
+
+
+**Output:**
+- Stellar Address: `GAQVFGRFNC6RNZ65JMPOMZKKZ66B3GCBO6RPUFFGSX3WCHCN5OXU74Z3`
+- Transaction Hash: `5fca9fc3212169d6794780ec947af8918a255f5c04285dd609b8ba5be9a1b374` [View in explorer](https://testnet.stellarchain.io/transactions/5fca9fc3212169d6794780ec947af8918a255f5c04285dd609b8ba5be9a1b374)
+
+
+***Note: This is a transaction that transfers 2 XLM from the TSS-controlled account `GAQVFGRFNC6RNZ65JMPOMZKKZ66B3GCBO6RPUFFGSX3WCHCN5OXU74Z3` to my personal account `GBZFRQE42G2ULRFFITXP2UZAXRBYKQM7R7LZ3QS7YHDUUI5QQRHGBZCY`***
+
+**Steps to Reproduce:**
+```cmd
+git clone https://github.com/mayoreee/switchly-work-log.git
+```
+```cmd
+cd demo/stellar && go mod tidy
+```
+```cmd
+go run .
+```
+
+
+Sweet! I also heard of the Soroban Multisig. Will look into that next
 
 
 
