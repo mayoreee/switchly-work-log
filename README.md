@@ -19,7 +19,7 @@ Total                33h 30m
 
 Today, we are learing about the Soroban Multisig Smart contract.
 
-The multisig smart contract vault on Soroban [sample code here](https://github.com/mayoreee/switchly-work-log/demo/soroban/src/lib.rs) would have custom logic that enforces signature thresholds, meaning a set number of validator approvals are required for any transaction to proceed. However, this requires the Switchly each Switchly validators maintaining their own private/public key pair on Stellar - does this complicate implementation on Stellar?
+The multisig smart contract vault on Soroban [sample code here](https://github.com/mayoreee/switchly-work-log/blob/main/demo/soroban/src/lib.rs) would have custom logic that enforces signature thresholds, meaning a set number of validator approvals are required for any transaction to proceed. However, this requires the Switchly each Switchly validators maintaining their own private/public key pair on Stellar - does this complicate implementation on Stellar?
 
 Practically, how would this work. Vadlidator A launches the chain and depoloys the smart contract. Additional validators choin the network and present their Stellar public key to Validator A, which will then deploy the smart contract on Soroban, initializing it with all Validator public keys as signers. 
 
@@ -36,7 +36,7 @@ Last time, I made my initial implementation of the TSS for Stellar, but couldn't
 
 Finally, after debugging and studying more on the edwards/ed25519 curve, I succeffully signed and broadcasted transactions on the Stellar testnet with a new approach. Haha I can't believe how I implemented this before!
 
-Below is my revised implementation summary and full code [here](https://github.com/mayoreee/switchly-work-log/demo/stellar/vault.go)
+Below is my revised implementation summary and full code [here](https://github.com/mayoreee/switchly-work-log/blob/main/demo/stellar/vault.go)
 
 **Approach Summary:**
 
