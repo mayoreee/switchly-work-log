@@ -11,9 +11,24 @@
 07.09.2024 Saturday 4h 30m
 08.09.2024 Sunday 6h
 14.09.2024 Saturday 9h
+17.09.2024 Tuesday 5h 30m
 
-Total                28h 00m
+Total                33h 30m
 ```
+### 17.09.2024 Tuesday
+
+Today, we are learing about the Soroban Multisig Smart contract.
+
+The multisig smart contract vault on Soroban [sample code here](https://github.com/mayoreee/switchly-work-log/demo/soroban/src/lib.rs) would have custom logic that enforces signature thresholds, meaning a set number of validator approvals are required for any transaction to proceed. However, this requires the Switchly each Switchly validators maintaining their own private/public key pair on Stellar - does this complicate implementation on Stellar?
+
+Practically, how would this work. Vadlidator A launches the chain and depoloys the smart contract. Additional validators choin the network and present their Stellar public key to Validator A, which will then deploy the smart contract on Soroban, initializing it with all Validator public keys as signers. 
+
+To transfer funds, each validator would independently sign an approval transaction calling the smart contract and the funds will then be trasferred after the threshold approval is met.
+
+On churn event, each validator would independently sign a transaction calling the smart contract and then folks will be churned in and out  after the threshold approval is met. Hmmm
+
+
+I have also published final report on work done here: https://docs.google.com/document/d/1DWyCTxvt5cG1OPxHXjC8UFNyH8KqZdFjd-yZuJoxouk/edit#heading=h.c3uvvzqtoxph
 
 ### 14.09.2024 Saturday
 
