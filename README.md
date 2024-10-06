@@ -12,9 +12,18 @@
 08.09.2024 Sunday 6h
 14.09.2024 Saturday 9h
 17.09.2024 Tuesday 5h 30m
+05.10.2024 Saturday   3h 
 
-Total                33h 30m
+Total                36h 30m
 ```
+
+### 05.10.2024 Saturday
+
+- Created spec document for valiator implementation here
+- Created dev plan and organized list of tasks and due dates on a Kanban board
+- Setup fresh repo and forked in thorchain v2.136.0
+- Attempting setup for thorchain node as-is
+
 ### 17.09.2024 Tuesday
 
 Today, we are learing about the Soroban Multisig Smart contract.
