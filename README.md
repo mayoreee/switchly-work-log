@@ -13,9 +13,15 @@
 14.09.2024 Saturday 9h
 17.09.2024 Tuesday 5h 30m
 05.10.2024 Saturday   3h 
+16.11.2024 Saturday 0h 30m
 
-Total                36h 30m
+Total                37h 00m
 ```
+
+### 16.11.2024 Saturday
+Started on Bifrost. Understanding it's components and how it works [docs here](https://docs.thorchain.org/technology/bifrost-tss-and-vaults)
+
+Also tied that to the client implementations for Bitcoin and Ethereum. Now I understand the flow better.
 
 ### 05.10.2024 Saturday
 
