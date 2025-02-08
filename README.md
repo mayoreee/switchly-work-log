@@ -8,7 +8,7 @@
 08.02.2024 Saturday   4h 30m
 
 
-Total                04h 00m 
+Total                04h 30m 
 ```
 
 ### 08.02.2024 Saturday
