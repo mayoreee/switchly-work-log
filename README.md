@@ -1,6 +1,6 @@
 # Switchly
 
-## Work Log
+## Work Log (Phase 2)
 
 ### Summary
 
@@ -12,7 +12,6 @@ Total                04h 00m
 ```
 
 ### 08.02.2024 Saturday
-
 Focus for today was implementing Thorchain changes as the first part of intergrating Stellar to the network which is described in the [Thorchain docs](https://gitlab.com/thorchain/thornode/-/blob/develop/docs/newchain.md?ref_type=heads).
 
 Made changes to go modules suchs as asset, chain, pubkey, address to support Stella/XLM. See changes:
