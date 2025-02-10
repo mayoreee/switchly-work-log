@@ -6,10 +6,17 @@
 
 ```
 08.02.2024 Saturday   4h 30m
+09.02.2024 Sunday   2h 00m
 
 
-Total                04h 30m 
+Total                06h 30m 
 ```
+### 09.02.2024 Sunday
+
+Worked on the second part of intergrating Stellar to the network which is described in the [Thorchain docs](https://gitlab.com/thorchain/thornode/-/blob/develop/docs/newchain.md?ref_type=heads).
+
+Forked this - https://gitlab.com/thorchain/devops/node-launcher into https://github.com/SwitchlyProtocol/node-launcher
+
 
 ### 08.02.2024 Saturday
 Focus for today was implementing Thorchain changes as the first part of intergrating Stellar to the network which is described in the [Thorchain docs](https://gitlab.com/thorchain/thornode/-/blob/develop/docs/newchain.md?ref_type=heads).
@@ -32,3 +39,5 @@ Also ran into a few issues getting thorchain and docker setup on a new M2 Mac ev
 
 
 Next, will focus on Node luahcer changes - https://gitlab.com/thorchain/devops/node-launcher
+
+
